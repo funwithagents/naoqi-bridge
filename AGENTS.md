@@ -10,13 +10,16 @@ Where things live. This is a coarse, module-level map — for the full file inve
 
 | Path | What's there |
 |---|---|
+| `README.md` | The landing page — what the bridge is, its status, install, the fake quick start, the feature list, the servers in brief and the links into `docs/`; its quick start is executed by `tests/test_docs_examples.py` |
+| `CONTRIBUTING.md` | How the project is run today — solo development, feedback through issues, no external pull requests yet |
 | `src/naoqi_bridge/` | The library itself — one module per core concept (see below) |
 | `specs/` | Pre-implementation design docs, one per concept, each with a `**Status:**` — indexed by [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning settled specs into buildable steps — indexed by [plans/_index.md](plans/_index.md) |
 | `tests/` | Fast, deterministic, no-network tests; mirrors the `src/naoqi_bridge/` module structure |
 | `tests-e2e/` | Opt-in live tests that call real external services (not collected by default `pytest`) |
 | `.github/workflows/` | The CI workflow: lint, format, types and the fast tier on every pull request and push to `main` — [ci.md](specs/ci.md) |
-| `examples/configs/` | Ready-to-use server config files (fake and real, MCP and WebSocket), kept in sync with [config.md](specs/config.md) |
+| `docs/` | The consumer documentation, entered through [docs/index.md](docs/index.md): [getting-started.md](docs/getting-started.md) (its first application is executed by `tests/test_docs_examples.py`); `reference/` — the API ([api.md](docs/reference/api.md)), the configuration ([configuration.md](docs/reference/configuration.md)) and the backends matrix ([backends.md](docs/reference/backends.md)); `servers/` — the [MCP server](docs/servers/mcp-server.md) and the [WebSocket server](docs/servers/websocket-server.md); `guides/` — the [simulator](docs/guides/simulator.md), the [viewer](docs/guides/viewer.md), [testing](docs/guides/testing.md) your project (its unit-test example runs in the fast tier). One home per fact: a reference owns it, every other page links there; the specs stay the normative design |
+| `examples/configs/` | Ready-to-use server config files (fake, sim and real, MCP and WebSocket), kept in sync with [config.md](specs/config.md) |
 
 ### `src/naoqi_bridge/` modules
 

@@ -173,7 +173,7 @@ Each server has its own config object, wrapping a `NaoqiBridgeConfig` under `bri
 - `mcp-sim.json` and `websocket-sim.json` ([sim.md](sim.md), "Example files")
 - `mcp-real.json` and `websocket-real.json` carry a disabled `viewer` block with the ghost on ([viewer.md](viewer.md), "Example files")
 
-The README's Claude Desktop / Tiny Agents snippets point `--config` at them.
+The MCP server page ([docs/servers/mcp-server.md](../docs/servers/mcp-server.md)) points its client setups' `--config` at them.
 
 ## Open questions
 
