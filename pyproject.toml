@@ -58,8 +58,9 @@ naoqi-viewer = { git = "https://github.com/funwithagents/naoqi-viewer", rev = "9
 
 [tool.ruff]
 target-version = "py312"  # keep in sync with requires-python
-# specs/ and plans/ hold design sketches in code fences, not code to format.
-extend-exclude = ["specs", "plans"]
+# specs/ and plans/ hold design sketches in code fences, not code to format; the docs'
+# examples keep their aligned comments (tests/test_docs_examples.py runs the ones that run).
+extend-exclude = ["specs", "plans", "docs", "README.md", "CONTRIBUTING.md"]
 
 [tool.ruff.lint]
 # Ruff's defaults are already broad; add pycodestyle, perf and annotations.

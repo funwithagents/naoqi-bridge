@@ -1,369 +1,146 @@
-# naoqi-bridge - Robot Interaction API & Servers
+# naoqi-bridge
 
-This repository provides a set of tools to communicate with Nao robots and their API (it should work with any robot running Naoqi, the OS embedded in all Aldebaran robots).
-The focus is on providing interactive high-level APIs to enable AI agent-based interactions with the robot.
+A Python library that sits between a robot running [Naoqi](https://www.aldebaran.com/en), Aldebaran's robot OS, and whatever drives it: a script, a service, or an LLM agent. It hides Naoqi's `qi` session and services behind one async, intent-level API, `NaoqiBridge`, whose verbs speak in human terms (*say this, stand up, dance, react, run that app*) and whose streams bring the robot's touch, posture, joints, microphone and cameras back out. Two thin servers expose that one object to other clients, an **MCP server** for LLM agents and a **JSON WebSocket server** for custom applications. The same code runs unchanged on a real robot, on a simulated one the bridge starts itself (Aldebaran's NAOqi in Docker), or on an offline fake. It has been built and verified on a Nao; in principle it drives any Naoqi robot, a Pepper included.
 
-It contains:
-- [NaoqiBridge](src/naoqi_bridge/bridge.py): the high-level async API to drive Nao, on top of a [robot seam](src/naoqi_bridge/robot.py) with a `real` backend (a Nao over `qi`) and a `fake` one (no hardware)
-- [Naoqi MCP server](src/naoqi_bridge/naoqi_mcp_server.py): a MCP server exposing NaoqiBridge as tools for LLM agents
-- [Naoqi WebSocket server](src/naoqi_bridge/naoqi_websocket_server.py): a websocket server to communicate with NaoqiBridge over the network
+**Start here:** [docs/getting-started.md](docs/getting-started.md), your first application on the offline fake, then on a simulated or a real robot; [docs/index.md](docs/index.md), the documentation by task. The [quick start](#quick-start) below is the shortest program; [what the bridge gives you](#what-the-bridge-gives-you) is the feature list.
 
-Design docs live in [specs/](specs/_index.md); contributor and agent instructions in [AGENTS.md](AGENTS.md).
-
-> [!IMPORTANT]
-> This has only been tested with Naoqi 2.1.4.13 on a Nao v5.
-> While the Qi package should work fine with more recent versions of Naoqi, the Naoqi API used here might have evolved since version 2.1.4.13. To test and add compatibility, we would need a Nao v6 robot (or even a Pepper robot) ! 🙂
-
-> [!NOTE]
-> No Nao robot? No worries! 😅 Run a simulated Nao with the `sim` backend (see [Simulated Nao](#simulated-nao-the-sim-backend)): Naoqi itself, in Docker, that speaks, moves and hears. Or, if your platform has no `qi` wheel (like an Intel Mac), use the `fake` backend (the default; `examples/configs/*-fake.json` for the servers): the API and servers run without actual hardware.
-> See usage details below.
-
-## Installation
-
-The project is managed with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv sync --dev
-```
-
-This installs the package and the `naoqi-mcp-server` / `naoqi-websocket-server` commands in `.venv`.
-
-## Dependency with qi python package
-
-Communicating with a real Nao relies on the `qi` Python package (`qi>=3.1.8,<4`). It comes from the package index of our [fork](https://github.com/funwithagents/libqi-python) of the [official libqi-python repository](https://github.com/aldebaran/libqi-python), which is no longer maintained: `https://funwithagents.github.io/libqi-python/simple/`, not PyPI (whose `qi` is Aldebaran's older 3.1.5). It is a declared dependency, so **`uv sync` installs it** on the platforms that have a wheel:
-
-| Platform | `qi` | What runs |
-|---|---|---|
-| macOS arm64, Linux x86_64, Windows x64 (Python 3.12 or 3.13) | installed by `uv sync` | real robot and fake |
-| macOS Intel, Linux arm64, Windows arm64 | not available | fake only |
+## Project status
 
 > [!WARNING]
-> Without `qi`, the `real` backend fails to connect with an explicit error; it never silently switches to the fake. On a platform without a wheel, use the `fake` backend.
+> - **Under development: the API may change.** The bridge is at version 0.1 and is shaped as it is used. Methods, config fields and module layout can change between commits, without a deprecation period. If you depend on it, pin a commit (`naoqi-bridge @ git+https://github.com/funwithagents/naoqi-bridge@<sha>`).
+> - **Verified on a Nao v5 running NAOqi 2.1.4.13, and on simulated Naoqi robots running NAOqi 2.1 and 2.8.** Every live test has run on that robot, and the live tier runs on both simulated versions in CI on every change. A **Nao v6** (NAOqi 2.8) or a **Pepper** has never been tried: the code paths are the 2.1 ones plus what the 2.8 simulator needed, and nothing more is guaranteed. If you have one, a report of what works and what doesn't is the most useful thing you can send.
 
-> [!NOTE]
-> uv finds `qi` through `pyproject.toml`. With pip, add the index: `pip install --extra-index-url https://funwithagents.github.io/libqi-python/simple/ <path-or-url-to-naoqi-bridge>`.
+> [!TIP]
+> **Feedback is welcome: open an issue.** Bug reports, questions, and what you would want the API or the config to do differently all go to [the issue tracker](https://github.com/funwithagents/naoqi-bridge/issues). The project is developed by one person and is not taking pull requests yet; [CONTRIBUTING.md](CONTRIBUTING.md) says why and how to help anyway.
 
-## Simulated Nao: the `sim` backend
+## Install
 
-The `sim` backend runs [naoqi-sim](https://github.com/funwithagents/naoqi-sim), Naoqi itself in a local Docker container, and drives it like a robot ([specs/sim.md](specs/sim.md)). It needs Docker, the `[sim]` extra (installed by `uv sync --dev`; `naoqi-bridge[sim]` for a project depending on naoqi-bridge) and, once per machine, the sim's images, built from Aldebaran's public downloads:
+Python 3.12 or 3.13. The package is not on PyPI yet; add it from its git URL, or from a local checkout:
 
-```bash
-uv run naoqi-sim fetch-and-build-images        # both NAOqi versions; or: ... 2.1
+```
+uv add "naoqi-bridge @ git+https://github.com/funwithagents/naoqi-bridge"
+uv add "naoqi-bridge[sim,test] @ git+https://github.com/funwithagents/naoqi-bridge"
+uv add "naoqi-bridge[sim,test] @ ../naoqi-bridge"   # a checkout next door
 ```
 
-Then a config with `"backend": "sim"` starts a sim with the bridge and stops it with the bridge, or uses the one already running (`uv run naoqi-sim run` in another terminal) and leaves it running. `sim.config` is a [naoqi-sim config](https://github.com/funwithagents/naoqi-sim) as it is (version, window, loudspeaker, microphone):
+| Extra | Adds | You need it for |
+|---|---|---|
+| *(none)* | `qi` (where a wheel exists), `mcp`, `websockets`, `numpy`, `Pillow` | The `real` backend, the offline `fake`, both servers |
+| `sim` | `naoqi-sim[viewer]`, from its git pin | The `sim` backend: a simulated Naoqi robot, NAOqi 2.1 or 2.8, in Docker ([docs/guides/simulator.md](docs/guides/simulator.md)). Brings the viewer too |
+| `viewer` | `naoqi-viewer`, from its git pin | A window mirroring the robot the bridge drives ([docs/guides/viewer.md](docs/guides/viewer.md)) |
+| `test` | `pytest` | The shipped `naoqi_bridge.testing` harness for your live tests ([docs/guides/testing.md](docs/guides/testing.md)) |
 
-```python
-bridge = NaoqiBridge.from_dict(
-    {
-        "backend": "sim",
-        "sim": {"spawn": "auto", "config": {"naoqi": {"version": "2.1"}}},
-    }
-)
-```
+`uv` resolves the bridge's sources for you: `qi` comes from the [funwithagents/libqi-python](https://github.com/funwithagents/libqi-python) fork's package index (PyPI's `qi` is Aldebaran's older 3.1.5, which this project does not use), naoqi-sim and naoqi-viewer from GitHub. With pip, add `--extra-index-url https://funwithagents.github.io/libqi-python/simple/` for `qi`; the `sim` and `viewer` extras are uv-only, since pip ignores git sources.
 
-`spawn` is `auto` (the default: use the running sim, else start one), `never` (only use a running one) or `always` (start one; one already running is an error). The servers take the same block: `examples/configs/mcp-sim.json`, `websocket-sim.json`. A sim has the `animations` package only (no dances or apps) and no touch input yet.
+**Platforms.** `qi` is a compiled wheel, available for macOS arm64, Linux x86_64 and Windows x64. There, `uv add` installs it and all three backends run. On macOS Intel, Linux arm64 and Windows arm64 there is no wheel: the package installs, the `fake` backend runs, and `real` or `sim` fail with an explicit error, never a silent fallback. The sim needs Docker as well. Developed on macOS; CI runs the fast tests on Linux, macOS and Windows and the live tests on Linux against a headless simulator of each NAOqi version. The one table of what each backend needs and gives is [docs/reference/backends.md](docs/reference/backends.md).
 
-The live tests run on a headless sim by default: `uv run pytest tests-e2e` (`NAOQI_E2E_SIM_VERSION=2.8` for 2.8, `NAOQI_E2E_SIM_VIEWER=1` to watch it in the sim window; `NAOQI_E2E_TARGET=real NAOQI_E2E_IP=… NAOQI_E2E_PROFILE=nao` for a robot, plus `NAOQI_E2E_ALLOW_MOTION=1` once it has room to move). Each test declares the capabilities it needs (`@pytest.mark.requires("dances")`) and skips where the target lacks them. See [specs/testing.md](specs/testing.md).
+In a checkout, `uv sync --dev` installs everything, extras included, and the `naoqi-mcp-server` and `naoqi-websocket-server` commands.
 
-The same harness ships for projects built on the bridge: install `naoqi-bridge[sim,test]`, add `pytest_plugins = ["naoqi_bridge.testing.plugin"]` to your rootdir `conftest.py`, and write live tests with `live_config` / `live_session` from `naoqi_bridge.testing` ([specs/testing_support.md](specs/testing_support.md)).
+## Quick start
 
-## Watching the robot: the viewer
-
-The bridge can open a [naoqi-viewer](https://github.com/funwithagents/naoqi-viewer) window that mirrors the robot it drives: the NAO model, posed live from the robot's joints, with the commanded pose as a ghost if you ask for it ([specs/viewer.md](specs/viewer.md)). It only reads; it never moves the robot. It needs the `[viewer]` extra (`[sim]` brings it too; `uv sync --dev` installs both) and a display:
-
-```python
-bridge = NaoqiBridge.from_dict(
-    {
-        "backend": "real",
-        "robot": {"ip": "192.168.1.42"},
-        "viewer": {"enabled": True, "config": {"ghost": True}},
-    }
-)
-```
-
-The window opens when the bridge starts and closes when it stops. `viewer.config` is a naoqi-viewer config (scene, model variant, ghost, polling rate), minus the mode and the robot's address, which the bridge sets. On `fake` there is no Naoqi to mirror, and a sim the bridge started already shows its own window: in both cases the viewer is skipped with a warning. Aldebaran's meshes, instead of the placeholder model: `uv run naoqi-viewer fetch-meshes` once, after its license prompt.
-
-## NaoqiBridge
-
-The high-level async API to drive Nao.
-
-### Usage
+Everything goes through `NaoqiBridge`, used as an async context manager. Nothing connects until you enter it; leaving it tears everything down. The `fake` backend needs no robot, no Docker and no extra:
 
 ```python
 import asyncio
+
 from naoqi_bridge import NaoqiBridge
 
 
-async def main():
-    # NaoqiBridge("fake") for the offline robot
-    bridge = NaoqiBridge.from_dict({"backend": "real", "robot": {"ip": "<nao-ip>"}})
-    async with bridge:
-        await bridge.wake_up()
-        await bridge.say("Hello!")
-        dances = bridge.get_dance_behaviors()
-        await bridge.dance(dances[0].id)
+async def main() -> None:
+    async with NaoqiBridge("fake") as bridge:  # "fake": the offline stand-in
+        await bridge.wake_up()  # motors on: the verbs that move the body need it
+        await bridge.say("Hello, I am Nao.")  # returns once spoken
+        dances = bridge.get_dance_behaviors()  # what this robot has installed
+        print([dance.id for dance in dances])
+        await bridge.dance(dances[0].id)  # returns when the dance ends; cancel the task to stop it
         await bridge.rest()
 
 
 asyncio.run(main())
 ```
 
-### Configuration
-
-The bridge is built from a `NaoqiBridgeConfig`, in code or from JSON (`NaoqiBridge.from_dict` / `from_json` / `from_json_file`). Every block is optional; the default is the offline fake with no streams:
-
-```json
-{
-  "backend": "real",
-  "robot": { "ip": "192.168.1.42", "port": 9559, "connect_timeout_s": 5.0 },
-  "streams": {
-    "joints": { "enabled": true, "period_s": 0.2 },
-    "audio": { "enabled": true, "channel": "front" },
-    "cameras": {
-      "top": { "enabled": true, "resolution": "qvga", "fps": 10 },
-      "bottom": { "enabled": false, "resolution": "qvga", "fps": 10 }
-    }
-  }
-}
-```
-
-- **`backend`**: `"fake"` (default, offline stand-in), `"real"` (needs `qi` and `robot.ip`) or `"sim"` (a simulated Nao, see [above](#simulated-nao-the-sim-backend))
-- **`robot`**: the robot's address, and how long to wait for it: one connection attempt of at most `connect_timeout_s`, so a wrong address fails within 5 s by default. Validated but ignored on `fake`, so switching backend is a one-word change
-- **`streams`**: which robot streams the bridge subscribes to (touch has no switch: it costs nothing and is always on); `channel` picks the microphone (`front`, `rear`, `left`, `right`); each camera (`top`, `bottom`) has its own `resolution` (`qqvga`, `qvga`, `vga`, `4vga`) and `fps` (1 to 30)
-- **`sim`**: on `sim`, whether to start the sim or use the running one (`spawn`) and the naoqi-sim config (`config`). Validated but ignored on the other backends
-- **`viewer`**: a window mirroring the robot (`enabled`) and its naoqi-viewer config (`config`), see [above](#watching-the-robot-the-viewer)
-
-A malformed config raises `ConfigError` naming the key (e.g. `streams.joints.period_s must be a positive, finite number`). Full reference: [specs/config.md](specs/config.md).
-
-`async with` connects on entry and disconnects on exit; `await bridge.start()` / `await bridge.stop()` do the same for hosts with their own lifecycle hooks. `bridge.robot` gives access to the underlying robot object while running.
-
-### Streams
-
-Each stream has its own API, open to any number of consumers. Touch is always on; the others when enabled:
+To drive a Naoqi, build the bridge from a config instead ([docs/reference/configuration.md](docs/reference/configuration.md)): `"backend": "real"` with the robot's address, or `"backend": "sim"` for a simulated robot the bridge starts for you.
 
 ```python
-streams = {
-    "joints": {"enabled": True},
-    "audio": {"enabled": True},
-    "cameras": {"top": {"enabled": True}},
-}
-async with NaoqiBridge.from_dict({"streams": streams}) as bridge:
-    # touch events
-    bridge.on_touch.subscribe(lambda event: print(event.part, event.touched))
-
-    # the latest joints state
-    pose = await bridge.joints.wait_for(lambda s: s is not None)
-    print(dict(zip(pose.names, pose.angles)))
-
-    # the newest camera frame: BGR bytes, a numpy view, the camera's pose
-    frame = await bridge.cameras["top"].wait_for(lambda f: True)
-    print(frame.frame_id, frame.image.shape, frame.camera_transform)
-
-    # the microphone: int16 LE mono at 16 kHz, every chunk in order
-    async for chunk in bridge.audio_input():
-        ...  # feed your ASR
+async with NaoqiBridge.from_dict({"backend": "real", "robot": {"ip": "192.168.1.42"}}) as bridge:
+    await bridge.say("Hello")  # the same program, on the robot
 ```
 
-- **Touch**: always on; `bridge.on_touch` is an event; handlers receive a `TouchEvent(part, touched)` on the event loop
-- **Posture**: always on; `bridge.posture` holds `PostureState(posture, family, moving, moving_to, ts)`: Naoqi's posture (`Stand`, `Sit`, `Crouch`, … or `Unknown`) and family, updated when the robot changes posture for any reason (a fall included); `moving` while `stand_up` / `sit_down` / `rest` move it, and `moving_to`, the target of the first two. Mid-move, Naoqi's posture is a guess, so wait for `not moving` for a settled one
-- **Joints**: `bridge.joints` holds the latest `JointsState(names, angles, ts)` (radians): read `.value`, iterate `.changes()` (a slow reader skips to the latest), or `await .wait_for(predicate)`
-- **Audio**: every `bridge.audio_input()` call is its own subscriber receiving every chunk; `preroll_s=` starts it in the past, as far as the ring of the last 200 chunks reaches (e.g. to hear the sentence that woke a wake-word detector); `bridge.mic.latest()` gives the newest chunk for level meters
-- **Cameras**: `bridge.cameras["top"]` / `["bottom"]` pull their camera at the configured `fps` and hold the newest `CameraFrame`: `frame_id`, `width` × `height` BGR `data` (`frame.image` is a `(height, width, 3)` numpy view), Naoqi's `naoqi_ts`, `camera_transform` (a row-major 4×4, camera → `FRAME_ROBOT`, read with the frame) and `fov` (radians). `.latest()` is a picture now (`None` outside a session or for a disabled camera); `async for frame in .frames()` follows each new one, latest-wins, so a slow consumer skips frames rather than lagging. A sim renders the top camera only
+`from_json(...)` and `from_json_file(...)` take the same config as a JSON string or file. The complete first application, with the streams, the lifecycle and an agent's tools, continues in [docs/getting-started.md](docs/getting-started.md).
 
-### APIs
+## What the bridge gives you
 
-Every action is `async`, returns `None` on success and raises to say why it failed: `ValueError` for an id or reaction type the catalog doesn't hold (the message lists the known ones), `NotRunningError` before `start()`, `NotPlayingError` when stopping something that isn't playing, `MotorsOffError` when a verb that moves the body (`stand_up`, `sit_down`, `set_breathing_enabled(True, …)`, `run_behavior`, `dance`, `expressive_reaction`, `body_action`, `run_app`) finds the motors off (call `wake_up()` first; the fake starts with them off, like a robot at rest), `CommandFailedError` when the robot fails the command (the Naoqi error chained). The last three are `BridgeError`s, so `except (BridgeError, ValueError)` catches every expected failure.
+`qi` gives full, low-level access to Naoqi's services, and the bridge keeps it: `bridge.robot` is the connected robot. On top of it, the bridge adds what an interactive application otherwise builds itself, one feature per row.
 
-Every action is also cancellable: cancelling the task that awaits it (`task.cancel()`, an `asyncio.timeout`, …) interrupts it. `say`, `stand_up` / `sit_down`, `run_behavior` and the catalog verbs (`dance`, `expressive_reaction`, `body_action`, `run_app`) stop what they started on the robot before the `CancelledError` reaches you, so the robot is silent, or the move or behavior has stopped where the cancel caught it. The other verbs return at once and their command completes.
+| Feature | What you get |
+|---|---|
+| **One async API in human terms** | A small set of `async` verbs: speech (`say`, `set_tts_language`), motors and postures (`wake_up`, `rest`, `stand_up`, `sit_down`), the eyes, breathing, basic awareness, any installed behavior by name; the same code on a robot, a simulator and an offline fake |
+| **A catalog of what's installed** | The robot's packages classified into dances, expressive reactions (`Happy`, `Proud`, `Laugh`, `Sad`, `HeadTouched`), body actions and apps, each with an id, its names and description; `dance(id)`, `expressive_reaction(type)`, `body_action(id)`, `run_app(id)` play them and `current_*` says what is playing |
+| **Failures that say why** | A verb returns `None` or raises a typed error with a message an agent can act on: `MotorsOffError` (call `wake_up`), `ValueError` naming the known ids, `CommandFailedError` with Naoqi's error chained. Never a `bool` |
+| **Everything is cancellable** | Cancel the task awaiting `say`, a posture move, a dance or any behavior and the robot has stopped by the time the `CancelledError` reaches you, in bounded time, with the session ready for the next verb |
+| **Touch** | `on_touch` fires a `TouchEvent` for each of the head's tactile sensors, pressed or released, on your event loop. Always on, no config needed |
+| **Posture** | `posture` holds what Naoqi says the robot's posture is (`Stand`, `Sit`, `Crouch`, …) and whether a bridge verb is moving it and where to, so a program waits for a settled posture instead of guessing. Always on, no config needed |
+| **Joints** | `joints` holds the latest joint angles, sampled at the configured period: read it, wait for a condition, or follow its changes |
+| **Microphone** | `audio_input()` yields the microphone as int16 mono PCM at 16 kHz, to as many listeners as you start, each receiving the whole stream, with a pre-roll into the recent past for a recognizer woken by a wake word |
+| **Cameras** | `cameras["top"]` and `["bottom"]` hold the newest frame of each camera: BGR pixels (a numpy view), Naoqi's timestamp, the camera's pose in the robot frame and its field of view; sample it or follow it, latest-wins |
+| **One JSON configuration** | Backend, robot address, streams, simulator and viewer in one file, checked when it loads with the offending key named; changing `backend` moves it between the robot, the simulator and the fake |
+| **A simulated robot** | `"backend": "sim"` runs Aldebaran's own NAOqi, 2.1 or 2.8, in a local Docker container through [naoqi-sim](https://github.com/funwithagents/naoqi-sim), with your loudspeaker, microphone and a rendered camera; the bridge starts it and stops it, or borrows the one you run |
+| **A window on the robot** | `"viewer": {"enabled": true}` opens a [naoqi-viewer](https://github.com/funwithagents/naoqi-viewer) window mirroring the robot the bridge drives, the commanded pose as a ghost if you ask |
+| **An MCP server** | `naoqi-mcp-server`: the verbs as tools for an LLM agent, behaviors that return once started so the agent can still stop them, failures as readable answers ([docs/servers/mcp-server.md](docs/servers/mcp-server.md)) |
+| **A WebSocket server** | `naoqi-websocket-server`: a JSON protocol for a game engine, a web app or another language: commands in, results and touch, joints, audio and JPEG camera frames out ([docs/servers/websocket-server.md](docs/servers/websocket-server.md)) |
+| **Testing, unit and live** | The `fake` backend records every command and keeps real timing, for unit tests with no robot. A shipped pytest harness runs live tests against the simulator or a robot, probes what the target can do and skips instead of failing |
 
-```python
-async with asyncio.timeout(10):
-    await bridge.dance("eagle-dance")  # stopped after 10 s, then TimeoutError
-```
+## The servers
 
-- **`async def set_tts_language(self, language: str)`**: Set the text-to-speech language
-- **`async def say(self, text: str)`**: Make the robot say something
-- **`async def stop_say(self)`**: Stop the robot talking
-- **`async def wake_up(self)`**: Enable robot motors
-- **`async def rest(self)`**: Disable robot motors
-- **`async def stand_up(self)`**: Make the robot stand up
-- **`async def sit_down(self)`**: Make the robot sit down
-- **`async def change_eyes_color(self, color: str)`**: Change the color of the robot's eyes
-- **`async def set_basic_awareness_state(self, enabled: bool, engagement_mode: str, tracking_mode: str)`**: Set the basic awareness state of the robot
-- **`async def set_breathing_enabled(self, enabled: bool, chain_name: str)`**: Enable or disable breathing for a specific chain
-- **`async def run_behavior(self, behavior_name: str)`** / **`stop_behavior`**: Run / stop any installed behavior by name
-- **`def get_dance_behaviors(self) -> list[BehaviorInfos]`**: Retrieve the list of available dances, needed to call `dance` with right info
-- **`async def dance(self, dance_id: str)`**: Make the robot execute a specific dance with given dance_id (from list of available dances)
-- **`async def stop_dance(self, dance_id: str)`**: Make the robot stop a running dance with given dance_id (from list of available dances)
-- **`def get_expressive_reaction_types(self) -> list[str]`**: Retrieve the list of available expressive reaction types, needed to call `expressive_reaction` with right info
-- **`async def expressive_reaction(self, reaction_type: str)`**: Make the robot play an expressive reaction for a given reaction_type (from list of available types)
-- **`async def stop_expressive_reaction(self, reaction_type: str)`**: Make the robot stop a running expressive reaction for a given reaction_type (from list of available types)
-- **`def get_body_action_behaviors(self) -> list[BehaviorInfos]`**: Retrieve the list of available body actions, needed to call `body_action` with right info
-- **`async def body_action(self, body_action_id: str)`**: Make the robot execute a specific action with its body for a given body_action_id (from list of available body actions)
-- **`async def stop_body_action(self, body_action_id: str)`**: Make the robot stop a running body action for a given body_action_id (from list of available body actions)
-- **`def get_app_behaviors(self) -> list[BehaviorInfos]`**: Retrieve the list of installed apps, needed to call `run_app` with right info
-- **`async def run_app(self, app_id: str)`** / **`stop_app`**: Run / stop an installed app
+Both servers run from one config file with the bridge's config under `bridge` and theirs under `server`; ready-made files for the fake, the simulator and a robot are in [examples/configs/](examples/configs/).
 
-> [!NOTE]
-> On the `fake` backend, the robot serves a fixed set of dances, reactions, body actions and apps, so the getters return data you can pass to `dance`, `expressive_reaction`, `body_action` and `run_app`.
-
-## Naoqi MCP server
-
-A MCP server linked to NaoqiBridge.
-
-### Usage
-
-- run the MCP server with a real Nao robot
-    - connect your Nao to your network
-    - retrieve its IP address (by pressing its torso button) ⇒ `<nao-ip>`
-    - put it in a copy of [examples/configs/mcp-real.json](examples/configs/mcp-real.json) (`bridge.robot.ip`)
-    - run the server: `uv run naoqi-mcp-server --config path/to/mcp-real.json`
-
-- run the server on the fake backend
-  - if you don't have a Nao robot or if your current setup is not compatible with the available qi packages, you can run the MCP server on the fake ⇒ all the MCP tools will be available for execution, they will just do nothing real
-  - `uv run naoqi-mcp-server` (no config means the fake), or `--config examples/configs/mcp-fake.json`
-
-A server config has a `bridge` block (the bridge's config above) and a `server` block (`transport`: `stdio` or `sse`).
-
-### Usage with HuggingFace Tiny Agents
-
-- create a dedicated folder, let's sat `nao-tiny-agent`
-- add a `PROMPT.md` file with a prompt like this:
+**MCP server** ([docs/servers/mcp-server.md](docs/servers/mcp-server.md)). An LLM agent drives the robot by calling tools: `say`, `wake_up`, `stand_up`, `get_dance_list` then `dance`, `expressive_reaction`, `run_app`, `get_running`, each `stop_*`. Plug it into any MCP client as a stdio server launched through `uv`; the page has the generic recipe and a Claude Desktop example.
 
 ```
-You are in charge of the behavior of Nao, a robot connected on the network. Nao is a fun and witty robot from Aldebaran.
-Your role it to answer to my inputs through Nao, using the provided tools.
-I will not see your answers except when using Nao tools. So always make sure to call Nao say tool for the answers.
-```
-- add a `agent.json` file with your configuration
-
-For a real robot (with your copy of `mcp-real.json`):
-```json
-{
-    "model": "Qwen/Qwen2.5-72B-Instruct",
-    "provider": "nebius",
-    "servers": [
-      {
-        "type": "stdio",
-        "config": {
-          "command": "uv",
-          "args": [
-            "--directory", "path/to/repo", "run", "naoqi-mcp-server",
-            "--config", "path/to/mcp-real.json"
-          ]
-        }
-      }
-    ]
-}
+uv run naoqi-mcp-server --config examples/configs/mcp-sim.json
 ```
 
-For the fake backend:
-```json
-{
-    "model": "Qwen/Qwen2.5-72B-Instruct",
-    "provider": "nebius",
-    "servers": [
-      {
-        "type": "stdio",
-        "config": {
-          "command": "uv",
-          "args": [
-            "--directory", "path/to/repo", "run", "naoqi-mcp-server",
-            "--config", "path/to/repo/examples/configs/mcp-fake.json"
-          ]
-        }
-      }
-    ]
-}
+**WebSocket server** ([docs/servers/websocket-server.md](docs/servers/websocket-server.md)). A client sends `{"id": "Command", "data": {"commandUuid", "commandId": "Say", "commandData": {"text": "Hello"}}}` and receives a `CommandEnded` with the result or the reason it failed, while `Touch`, `Joints`, `Audio` and `Frame` messages stream the robot's data. One client at a time.
+
+```
+uv run naoqi-websocket-server --config examples/configs/websocket-fake.json
 ```
 
-- set your HuggingFace token: `export HF_TOKEN=<token>`
-- run your tiny agent: `npx @huggingface/tiny-agents run ./nao-tiny-agent`
+## Documentation
 
-> [!NOTE]
-> It works well when asking explicitly the agent to do actions on Nao like "Make Nao do xxx"
-> However, when trying to have the agent answering as if it was Nao, it keeps forgetting to use the tool "say" to anwser to the user via Nao, and answers directly in text instead. Maybe it could be improved/avoided using a better prompt.
+Start at [docs/index.md](docs/index.md), the documentation by task. The pages a consumer uses most:
 
+| | |
+|---|---|
+| [docs/getting-started.md](docs/getting-started.md) | Your first application, on the fake, then on a sim or a robot; the lifecycle; the streams; driving it from an agent |
+| [docs/reference/api.md](docs/reference/api.md) | Every verb, value and error; the catalog; the streams; cancellation |
+| [docs/reference/configuration.md](docs/reference/configuration.md) | Every config field and its default; the server configs; the CLIs |
+| [docs/reference/backends.md](docs/reference/backends.md) | The fake, the sim on 2.1 and 2.8, a Nao v5 and a Nao v6: what each offers, how far each is validated |
+| [docs/servers/](docs/servers/) | The MCP server and the WebSocket server |
+| [docs/guides/](docs/index.md#by-task) | The simulator, the viewer, testing your project |
+| [examples/configs/](examples/configs/) | A server config per setup |
 
-### Usage with Claude Desktop
+## How it is developed
 
-- Add to your `claude_desktop_config.json`
+The bridge is a spec-driven project: every feature is designed before it is coded, pinned by tests at two levels, and checked by CI on every change.
 
-For a real robot (with your copy of `mcp-real.json`):
-```json
-"mcpServers": {
-  "naoqi-mcp": {
-    "command": "uv",
-    "args": [
-      "--directory", "path/to/repo", "run", "naoqi-mcp-server",
-      "--config", "path/to/mcp-real.json"
-    ]
-  }
-}
+- **Specs first.** Each concept has one spec under [specs/](specs/_index.md), the normative design with its rationale and open questions; [specs/_overview.md](specs/_overview.md) is the architecture. Each spec names the code and test files it governs, and a test keeps that map and the statuses honest.
+- **Fast tests on the fake.** `tests/` covers the bridge and both servers against the offline `fake`, and the robot layer against a stub `qi`: no robot, no Docker, no network, deterministic.
+- **Live tests on a Naoqi.** `tests-e2e/` runs the verbs, the streams, cancellation and both servers against a simulated Naoqi robot, headless or in its window, or a real one, through the shipped harness; each test declares the capabilities it needs and skips where the target lacks them.
+- **CI on every change.** Lint, format and types; the fast tier on Linux, macOS and Windows, each with its own `qi` wheel; and the live tier on a headless simulator of each NAOqi version, 2.1 and 2.8, whose images the runner builds and caches itself ([specs/ci.md](specs/ci.md)).
+- **[AGENTS.md](AGENTS.md) is the operating manual** for anyone, or any coding agent, working in the repo: the project map, the verification gate, how the specs and plans are kept in step with the code.
+
+The same gate, locally:
+
+```
+uv sync --dev
+uv run ruff check .
+uv run ruff format .
+uv run pyright
+uv run pytest                 # the fast tier, offline
+uv run pytest tests-e2e -rs   # the live tier, on a simulator the harness starts (Docker, the images built once)
 ```
 
-For the fake backend:
-```json
-"mcpServers": {
-  "naoqi-mcp": {
-    "command": "uv",
-    "args": [
-      "--directory", "path/to/repo", "run", "naoqi-mcp-server",
-      "--config", "path/to/repo/examples/configs/mcp-fake.json"
-    ]
-  }
-}
-```
+## License
 
-- start Claude Desktop
-- start a new conversation with a prompt like this one
-```
-You are incarnating Nao, a fun and witty robot from the company Aldebaran. You can only answer using the naoqi-mcp tools, no text output.  And when Nao speaks, use short answers.
-```
-
-### Tools
-
-- **`set_tts_language`**: Change the language of Nao text to speech
-- **`say`**: Make Nao say something
-- **`wake_up`**: Enable Nao motors for action
-- **`rest`**: Disable Nao motors
-- **`stand_up`**: Make Nao stand up
-- **`sit_down`**: Make Nao sit down
-- **`get_dance_list`**: Get the list of available dances, needed before calling the dance tool
-- **`dance`** / **`stop_dance`**: Make the robot start / stop a dance
-- **`get_expressive_reaction_types`**: Get the list of available reaction types, needed before calling the expressive_reaction tool
-- **`expressive_reaction`** / **`stop_expressive_reaction`**: Make Nao start / stop reacting expressively to a specific emotion/situation
-- **`get_body_actions_list`**: Get the list of available body actions, needed before calling the body_action tool
-- **`body_action`** / **`stop_body_action`**: Make Nao start / stop an action with its body
-- **`get_app_list`**: Get the list of installed apps, needed before calling the run_app and stop_app tools
-- **`run_app`** / **`stop_app`**: Make Nao start / stop an installed app
-- **`get_running`**: What Nao is playing right now (dances, reactions, body actions, apps)
-
-`dance`, `expressive_reaction`, `body_action` and `run_app` return as soon as the behavior has started (or with the reason it couldn't), like the WebSocket server's commands: the behavior goes on while the agent calls other tools, `get_running` says whether it's still playing, and the matching `stop_*` tool ends it.
-
-## Naoqi WebSocket server
-
-A server to communicate with NaoqiBridge over the network via websocket.
-It provides access to all NaoqiBridge features through websocket messages in JSON format.
-
-### Usage
-
-- run the server with a real Nao robot
-    - connect your Nao to your network
-    - retrieve its IP address (by pressing its torso button) ⇒ `<nao-ip>`
-    - put it in a copy of [examples/configs/websocket-real.json](examples/configs/websocket-real.json) (`bridge.robot.ip`), and choose the streams sent to the client in `bridge.streams`
-    - run the server: `uv run naoqi-websocket-server --config path/to/websocket-real.json`
-
-- run the server on the fake backend
-  - if you don't have a Nao robot or if your current setup is not compatible with the available qi packages, you can run the server on the fake ⇒ all communication with the server will work but will just do nothing real
-  - `uv run naoqi-websocket-server --config examples/configs/websocket-fake.json` (every stream on, the fake streams silent audio, camera frames of a test pattern, and joints for all 26 joints at the angles of its posture: `Crouch` at rest, `Stand` / `Sit` after `StandUp` / `SitDown`. The angles were measured on a simulated Nao)
-
-The `server` block sets the WebSocket `host` (the address to bind; empty, the default, means the machine's LAN IP, or `127.0.0.1` when offline; `"0.0.0.0"` every interface) and `port` (default 8002; `0` lets the OS pick).
-
-### Messages
-
-> [!NOTE]
-> The full protocol (envelope, commands and their data, streamed events) is described in [specs/naoqi-websocket-server.md](specs/naoqi-websocket-server.md). The first message of every session, `NaoqiState`, carries `protocolVersion` (currently `2`: version 2 renamed `NaoState` to `NaoqiState`), bumped only on incompatible changes.
-
-For each camera enabled in `bridge.streams.cameras`, the server sends a `Frame` message per new frame: `{camera, frameId, width, height, format: "jpeg", data: <base64 JPEG>, cameraTransform: [16 floats], fov: [h, v]}`. A slow connection skips frames rather than lagging.
+MIT, see [LICENSE](LICENSE).

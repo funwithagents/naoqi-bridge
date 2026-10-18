@@ -2,7 +2,7 @@
 
 **Status:** Done
 
-Implements `specs/testing.md` ("Live tier: levels of risk"). Adds live tests that cover the bridge's verbs, its streams, the cancellation contract ([bridge.md](../specs/bridge.md) "Cancellation") and both servers against a real Nao, at three opt-in levels: safe, motion and interactive. Cancel latencies are measured and printed. What it leaves out: running these tests on a robot. That needs a Nao and someone watching it, so it's tracked in [analysis/202610091738_not-yet-tested-on-a-robot.md](../analysis/202610091738_not-yet-tested-on-a-robot.md) and not done here. No library code changes, apart from a stale MCP docstring.
+Implements `specs/testing.md` ("Live tier: levels of risk"). Adds live tests that cover the bridge's verbs, its streams, the cancellation contract ([bridge.md](../specs/bridge.md) "Cancellation") and both servers against a real Nao, at three opt-in levels: safe, motion and interactive. Cancel latencies are measured and printed. What it leaves out: running these tests on a robot. That needs a Nao and someone watching it, so it's tracked in [analysis/202610161840_not-yet-tested-on-a-robot.md](../analysis/202610161840_not-yet-tested-on-a-robot.md) (first written as `202610091738_not-yet-tested-on-a-robot.md`) and not done here. No library code changes, apart from a stale MCP docstring.
 
 ## Scope
 
@@ -17,7 +17,7 @@ Implements `specs/testing.md` ("Live tier: levels of risk"). Adds live tests tha
 - `src/nao_bridge/nao_mcp_server.py` — `_cancel_runs` docstring: cancelling a run now stops its behavior.
 - Spec frontmatter `tests:` — the new modules under the specs they exercise (`bridge.md`, `microphone.md`, both server specs).
 - `specs/_overview.md` — the live tier line and the testing section.
-- `analysis/202610091738_not-yet-tested-on-a-robot.md` — the reminder of what no robot has confirmed yet.
+- `analysis/202610091738_not-yet-tested-on-a-robot.md` (now `202610161840_…`) — the reminder of what no robot has confirmed yet.
 
 ## Steps
 
