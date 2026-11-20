@@ -17,7 +17,7 @@ from .config import AudioChannel, CameraResolution
 from .robot import (
     AUDIO_CHANNEL_CODES,
     AUDIO_SAMPLE_RATE,
-    CAMERA_COLORSPACE_BGR,
+    CAMERA_COLORSPACE_YUV422,
     CAMERA_HANDLES_PER_NAME,
     CAMERA_INDEXES,
     CAMERA_NAMES,
@@ -34,7 +34,7 @@ from .robot import (
     TouchCallback,
 )
 
-__all__ = ["RealNaoqiRobot"]
+__all__ = ["RealNaoqiRobot", "yuv422_to_bgr"]
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ class RealNaoqiRobot:
             name,
             CAMERA_INDEXES[camera],
             CAMERA_RESOLUTION_CODES[resolution],
-            CAMERA_COLORSPACE_BGR,
+            CAMERA_COLORSPACE_YUV422,
             fps,
         )
         if not handle:
@@ -310,7 +310,7 @@ class RealNaoqiRobot:
         return CameraRead(
             width=width,
             height=height,
-            data=bytes(buffer),
+            data=yuv422_to_bgr(bytes(buffer), width, height),
             naoqi_ts=ts_s + ts_us / 1e6,
             fov=(left - right, top - bottom),
             transform=tuple(float(x) for x in transform),
@@ -320,3 +320,28 @@ class RealNaoqiRobot:
         handle = self._camera_handles.pop(camera, None)
         if handle is not None:
             self._service("ALVideoDevice").unsubscribe(handle)
+
+
+def yuv422_to_bgr(data: bytes, width: int, height: int) -> bytes:
+    """Naoqi's YUV422 image (``Y0 U Y1 V`` for each pair of pixels, row-major) as BGR
+    bytes, 3 a pixel (specs/camera.md "Colorspace").
+
+    BT.601 at limited range (Y from 16 to 235), the conversion Naoqi itself applies: on a
+    sim it reproduces Naoqi's own BGR of the same capture to within one level. Raises
+    ``ValueError`` when ``data`` is not ``width x height x 2`` bytes."""
+    import numpy as np
+
+    if width % 2 or len(data) != width * height * 2:
+        raise ValueError(
+            f"a {width}x{height} YUV422 image has {width * height * 2} bytes, "
+            f"got {len(data)}"
+        )
+    pairs = np.frombuffer(data, np.uint8).reshape(height, width // 2, 4)
+    luma = (pairs[..., 0::2].reshape(height, width).astype(np.float32) - 16) * 1.164
+    u = np.repeat(pairs[..., 1], 2, axis=1).astype(np.float32) - 128
+    v = np.repeat(pairs[..., 3], 2, axis=1).astype(np.float32) - 128
+    bgr = np.empty((height, width, 3), np.float32)
+    bgr[..., 0] = luma + 2.017 * u
+    bgr[..., 1] = luma - 0.392 * u - 0.813 * v
+    bgr[..., 2] = luma + 1.596 * v
+    return np.clip(np.rint(bgr), 0, 255).astype(np.uint8).tobytes()

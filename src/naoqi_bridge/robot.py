@@ -20,7 +20,7 @@ __all__ = [
     "AUDIO_CHANNEL_CODES",
     "AUDIO_SAMPLE_RATE",
     "CAMERAS",
-    "CAMERA_COLORSPACE_BGR",
+    "CAMERA_COLORSPACE_YUV422",
     "CAMERA_INDEXES",
     "CAMERA_NAMES",
     "CAMERA_RESOLUTION_CODES",
@@ -89,7 +89,9 @@ CAMERA_SUBSCRIBER_NAMES: dict[Camera, str] = {
     "bottom": "NaoqiBridgeCameraBottom",
 }
 CAMERA_HANDLES_PER_NAME = 7
-CAMERA_COLORSPACE_BGR = 13  # kBGRColorSpace
+# The colorspace the bridge asks for: the camera's own, so the robot converts nothing and
+# sends 2 bytes a pixel; the seam converts to BGR (specs/camera.md "Colorspace").
+CAMERA_COLORSPACE_YUV422 = 9  # kYUV422ColorSpace: Y0 U Y1 V for each pair of pixels
 FRAME_ROBOT = 2  # ALMotion's frame on the ground between the feet
 
 
@@ -99,7 +101,7 @@ class CameraRead:
 
     width: int
     height: int
-    data: bytes  # BGR, 3 bytes per pixel, row-major
+    data: bytes  # BGR, 3 bytes per pixel, row-major (converted from Naoqi's YUV422)
     naoqi_ts: float  # Naoqi's capture timestamp, seconds on the robot's clock
     fov: tuple[float, float]  # (left - right, top - bottom) angles, radians
     transform: tuple[float, ...]  # camera -> FRAME_ROBOT, a row-major 4x4

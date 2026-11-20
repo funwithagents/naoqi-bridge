@@ -12,6 +12,7 @@ tests:
   - tests/test_camera.py
   - tests/test_bridge.py
   - tests/test_config.py
+  - tests/test_real_robot.py
   - tests-e2e/test_live_streams.py
 ---
 
@@ -27,7 +28,7 @@ The design follows the mic feed ([microphone.md](microphone.md)) in lifecycle an
 
 ### Why one feed per camera, pulled
 
-Unlike `ALAudioDevice`, which pushes buffers to a registered service, **`ALVideoDevice` is pull-based** for a remote client: `subscribeCamera(name, camera, resolution, colorspace, fps)` returns a handle, `getImageRemote(handle)` returns the newest frame for that handle (the *same* frame again, with the same timestamp, until a new one is captured), and `unsubscribe(handle)` ends it. Naoqi converts per subscriber, on the robot: each subscription costs the robot's CPU and, on Wi-Fi, its own stream. Measured through qi 3.1.8 on a naoqi-sim 2.1 (one pull):
+Unlike `ALAudioDevice`, which pushes buffers to a registered service, **`ALVideoDevice` is pull-based** for a remote client: `subscribeCamera(name, camera, resolution, colorspace, fps)` returns a handle, `getImageRemote(handle)` returns the newest frame for that handle (the *same* frame again, with the same timestamp, until a new one is captured), and `unsubscribe(handle)` ends it. Naoqi converts per subscriber, on the robot, into the colorspace the subscription asked for: each subscription costs the robot's CPU and, on Wi-Fi, its own stream. The bridge asks for the camera's own YUV422, which costs the robot no conversion, and converts to BGR itself ("Colorspace" below). Measured through qi 3.1.8 on a naoqi-sim 2.1 (one pull):
 
 | Resolution (BGR) | `getImageRemote` median | Bytes per frame |
 |---|---|---|
@@ -57,7 +58,7 @@ class CameraFrame:
     camera: Camera
     width: int
     height: int
-    data: bytes                        # BGR, 3 bytes per pixel, row-major — Naoqi's buffer, as is
+    data: bytes                        # BGR, 3 bytes per pixel, row-major — converted from Naoqi's YUV422
     naoqi_ts: float                    # Naoqi's capture timestamp, seconds on the robot's clock
     camera_transform: tuple[float, ...]  # 16 floats, a row-major 4×4: camera → FRAME_ROBOT, read with the frame
     fov: tuple[float, float]           # the camera's horizontal and vertical field of view, radians
@@ -68,7 +69,7 @@ class CameraFrame:
 
 - **`frame_id`** increases by one per published frame, from 1, and keeps counting across sessions of the same bridge object, so a result from an earlier session can never be mistaken for a new one. `published_count` equals the last `frame_id`; the achieved rate over a window is `Δpublished_count / Δt`.
 - **`ts`** is the arrival time on the bridge's monotonic clock, as for `MicChunk` and `JointsState`. **`naoqi_ts`** is the timestamp Naoqi set when the frame was captured (the image's `timestamp_s + timestamp_us / 1e6`): epoch time on NAOqi 2.1, the robot's monotonic clock on 2.8, so it orders and tells frames apart but is never compared with `ts`. It is the key the feed uses to publish a frame once.
-- **`data`** is Naoqi's buffer copied once into `bytes`, shared by reference with every consumer; `bytes` is immutable, so no consumer can alter what another reads. The colorspace is **BGR** (`kBGRColorSpace`, 13), the convention of OpenCV and of the vision libraries a frame is handed to; a consumer that wants RGB flips its copy.
+- **`data`** is the BGR image the seam converted from Naoqi's YUV422 buffer ("Colorspace" below), built once into `bytes` and shared by reference with every consumer; `bytes` is immutable, so no consumer can alter what another reads. **BGR** is the convention of OpenCV and of the vision libraries a frame is handed to; a consumer that wants RGB flips its copy.
 - **`image`** builds a `numpy` view on `data` (`np.frombuffer(...).reshape(height, width, 3)`, read-only), so a frame costs nothing until a consumer asks for the array, and a consumer that only wants the bytes (a JPEG encoder) never touches numpy. `frame_id`, `ts` and `image` are the names a vision graph built on latest-value sampling reads (the `Upstream[FrameLike]` shape of the funwithagents vision-modules runtime): `CameraFeed.latest()` returning `CameraFrame`s plugs onto one without an adapter. The compatibility is structural; the bridge imports no vision library.
 - **`camera_transform`** is `ALMotion.getTransform(<camera>, FRAME_ROBOT, True)` read **right after the image**, in the same seam call (0.2 ms; image and transform together are 0.8 ms at QVGA on the sim). FRAME_ROBOT is Naoqi's frame on the ground between the feet, x forward, y left, z up: the frame `ALTracker.lookAt` / `pointAt`, `ALMotion.moveTo`, people perception and sound localization all take, where FRAME_TORSO tilts with the body and FRAME_WORLD drifts with odometry. In the camera's own frame x is the optical axis, y left, z up. The transform is read at the pull, not at the capture: the frame is up to one period old (plus the network), so while the head turns fast the pose can be a few degrees off. Open question 1 says how to tighten it; the spec says it plainly rather than attach a pose it can't stand behind.
 - **`fov`** is `(left − right, top − bottom)` of the angles Naoqi returns with every image: `(1.063, 0.831)` rad, 60.9° × 47.6°, for a Nao v5 camera. With it a consumer maps a pixel to a direction in the camera frame without a calibration file: for a point at normalised `(u, v)` (origin top-left), `yaw = (0.5 − u) · fov[0]`, `pitch = (v − 0.5) · fov[1]` (positive down, as Naoqi's `getAngularPositionFromImagePosition` reports), direction `(cos pitch · cos yaw, cos pitch · sin yaw, −sin pitch)`; through `camera_transform` that is a ray in FRAME_ROBOT, and a point along it at an assumed distance is what gaze needs (open question 2).
@@ -91,6 +92,15 @@ CameraFeed(camera)
 - **Failures.** A `read_camera` that raises is logged at `DEBUG` and retried at the next period; one that keeps raising for `CAMERA_DOWN_S = 5` s logs one `WARNING` (and one `INFO` when frames return), and the last frame stays published meanwhile. A camera whose `naoqi_ts` **never changes** for `CAMERA_DOWN_S` logs one `WARNING` naming the camera: that is a camera Naoqi serves but nothing feeds, which is what a naoqi-sim's bottom camera is today ([sim.md](sim.md); it answers a constant placeholder with timestamp 0). The feed does not fail the session for it.
 - **Bound per session, alive per bridge.** `bridge.cameras` is a read-only mapping holding **both** feeds from construction, enabled or not, so a consumer wires itself to a feed before the session starts. `NaoqiBridge.start()` starts each feed whose `streams.cameras.<camera>.enabled` is set, after the mic feed; `stop()` stops them before the mic feed. `stop()` cancels the task, publishes `None` (so `latest()` reads `None` and every `frames()` ends), and unsubscribes the camera on the robot, off the loop. Cancelling `start()` tears the feeds down with the rest ([bridge.md](bridge.md) "Lifecycle").
 - **Stale handles.** Naoqi keeps a remote subscription until it is unsubscribed or the robot reboots, allows **seven** handles per subscriber name (`name_0` … `name_6`; the eighth `subscribeCamera` returns an empty handle), and answers `False`, not an error, to `unsubscribe` of an unknown handle. A bridge process that died without unsubscribing therefore leaves a handle behind, and seven such deaths would exhaust the name. So `subscribe_camera` first unsubscribes `<name>_0` … `<name>_6` for its camera's name, then subscribes. The names are `NaoqiBridgeCameraTop` and `NaoqiBridgeCameraBottom`.
+
+### Colorspace: YUV422 on the wire, BGR in the frame
+
+The camera captures **YUV422** (`kYUV422ColorSpace`, 9): for each pair of pixels, `Y0 U Y1 V`, so each pixel has its own luma and a pair shares its colour, 2 bytes a pixel. A subscription asking for BGR has Naoqi convert every frame on the robot and send 3 bytes a pixel. The bridge asks for YUV422 and converts on the host:
+
+- **A third fewer bytes on the wire.** On a Nao v5 (NAOqi 2.1.4.13) one QVGA pull took 122 ms in YUV422 against 192 to 208 ms in BGR over Wi-Fi, and 23 against 45 ms over Ethernet (2026-10-16); a VGA pull 875 against 1377 ms over Wi-Fi (2026-11-20). The Wi-Fi stays the limit (it carried about 1 MB/s), but every frame is a third smaller.
+- **No conversion on the robot.** Pulled flat out over Ethernet, the robot served VGA at 23 fps in YUV422 against 15 fps in BGR: the conversion is the robot's processor's work, now saved.
+- **The conversion on the host** is `yuv422_to_bgr` in `real_robot.py`: BT.601 at limited range (Y from 16 to 235), with numpy, about 2.4 ms a VGA frame on a laptop, in the worker thread of the read. It is the conversion Naoqi applies itself: on a 2.1 and a 2.8 sim it reproduces Naoqi's own BGR of the same capture to within a level on average, and to one level at worst at VGA, where no scaling is involved; at QVGA Naoqi scales the image differently by colorspace, which moves sharp edges by tens of levels in a few pixels. On a robot, of the full-range and BT.709 alternatives, it is again the closest.
+- **Nothing changes above the seam.** `CameraRead.data` and `CameraFrame.data` stay BGR; the fake serves BGR as before. A buffer that is not `width × height × 2` bytes is a failed read (`ValueError`, logged and retried by the feed, "The feed").
 
 ### Config: `streams.cameras`
 
@@ -121,11 +131,11 @@ class CameraStreams(JsonConfig):
 | `resolution` | Size | Naoqi code | Note |
 |---|---|---|---|
 | `qqvga` | 160×120 | 0 | |
-| `qvga` | 320×240 | 1 | the default: 2.3 MB/s of BGR at 10 fps, what Wi-Fi carries comfortably |
+| `qvga` | 320×240 | 1 | the default: 1.5 MB/s of YUV422 at 10 fps, the full rate over Ethernet; a Nao v5's Wi-Fi (about 1 MB/s) gives a few frames a second |
 | `vga` | 640×480 | 2 | the largest a naoqi-sim serves (2.8's `putImage` stops at VGA) |
 | `4vga` | 1280×960 | 3 | a Nao v5's top camera; **a NAOqi 2.8 sim silently serves QVGA for it**. The frame says its real `width` × `height`; the config is a request |
 
-`fps` is the rate asked of Naoqi (`subscribeCamera`'s last argument; Naoqi refreshes the subscriber's frame at most that often) and the feed's pull period. Both are checked at load: an unknown `resolution` and an `fps` that isn't an integer in 1–30 are `ConfigError`s naming `streams.cameras.<camera>.<field>`. Colorspace is not configurable (BGR, above). The default config enables no camera, as for the other streams.
+`fps` is the rate asked of Naoqi (`subscribeCamera`'s last argument; Naoqi refreshes the subscriber's frame at most that often) and the feed's pull period. Both are checked at load: an unknown `resolution` and an `fps` that isn't an integer in 1–30 are `ConfigError`s naming `streams.cameras.<camera>.<field>`. Colorspace is not configurable (YUV422 on the wire, BGR in the frame, above). The default config enables no camera, as for the other streams.
 
 ### The seam ([robot.md](robot.md))
 
@@ -134,7 +144,7 @@ class CameraStreams(JsonConfig):
 class CameraRead:                      # what one pull returns, in Naoqi's terms
     width: int
     height: int
-    data: bytes                        # BGR
+    data: bytes                        # BGR, converted from Naoqi's YUV422
     naoqi_ts: float
     fov: tuple[float, float]           # (left − right, top − bottom) angles, radians
     transform: tuple[float, ...]       # ALMotion.getTransform(<camera>, FRAME_ROBOT, True), 16 floats
@@ -145,7 +155,7 @@ class NaoqiRobot(Protocol):
     def unsubscribe_camera(self, camera: Camera) -> None: ...
 ```
 
-- `RealNaoqiRobot`: `subscribe_camera` clears the stale handles (above), then `ALVideoDevice.subscribeCamera(name, index, resolution_code, 13, fps)` and keeps the handle per camera. `read_camera` is `getImageRemote(handle)`, then `ALMotion.getTransform(camera_name, 2, True)`, then `releaseImage(handle)`; it builds `CameraRead` from the image's `width, height, …, timestamp_s, timestamp_us, buffer, …, left, top, right, bottom`. `unsubscribe_camera` is `unsubscribe(handle)` and forgets it; `close()` unsubscribes what is still subscribed. The constants (`CAMERA_INDEXES`, `CAMERA_NAMES`, `CAMERA_RESOLUTION_CODES`, `CAMERA_SUBSCRIBER_NAMES`, the BGR code, `FRAME_ROBOT`) live in `robot.py` with the audio ones.
+- `RealNaoqiRobot`: `subscribe_camera` clears the stale handles (above), then `ALVideoDevice.subscribeCamera(name, index, resolution_code, 9, fps)` (YUV422) and keeps the handle per camera. `read_camera` is `getImageRemote(handle)`, then `ALMotion.getTransform(camera_name, 2, True)`, then `releaseImage(handle)`; it builds `CameraRead` from the image's `width, height, …, timestamp_s, timestamp_us, buffer, …, left, top, right, bottom`, the buffer converted to BGR (`yuv422_to_bgr`). `unsubscribe_camera` is `unsubscribe(handle)` and forgets it; `close()` unsubscribes what is still subscribed. The constants (`CAMERA_INDEXES`, `CAMERA_NAMES`, `CAMERA_RESOLUTION_CODES`, `CAMERA_SUBSCRIBER_NAMES`, the YUV422 code, `FRAME_ROBOT`) live in `robot.py` with the audio ones.
 - The two Naoqi calls of a read run back to back on the same thread; the transform is the camera's pose within a millisecond of the pull.
 
 ### Consumers in this repo
@@ -171,11 +181,12 @@ class NaoqiRobot(Protocol):
 - `image` is a `(height, width, 3)` `uint8` view whose bytes are `data`; `fov` and `camera_transform` are what the fake served;
 - the config: defaults, the two blocks, `resolution` and `fps` checks with their key paths;
 - the bridge subscribes exactly the enabled cameras with the configured settings, and unsubscribes them at `stop()`;
-- the WebSocket session sends a decodable JPEG `Frame` per published frame with the right `camera` and size.
+- the WebSocket session sends a decodable JPEG `Frame` per published frame with the right `camera` and size;
+- on a stub `qi`: the real robot subscribes in YUV422 and reads BGR; `yuv422_to_bgr` gives black, white and pure red for their YUV values, each pixel its own luma and its pair's colour, round-trips a BGR image to within two levels, and refuses a buffer of the wrong size.
 
 ### Live tier ([testing.md](testing.md))
 
-A test gated on `camera` enables the top camera at `qvga`, 10 fps, waits up to 3 s for `latest()`, and asserts the frame is 320×240 with `len(data) == width × height × 3`, that `camera_transform` is a plausible pose (last row `0 0 0 1`, the camera between 0.3 and 0.6 m above the ground, since the robot is sitting or standing), and that at least 5 frames arrive in the next second; it records the measured rate in the run's `measured live` summary. The `camera` capability already exists and the `sim` profile pins it ([testing_support.md](testing_support.md)): naoqi-sim renders the top camera at 15 fps into `ALVideoDevice`, so the test runs on every CI run. The bottom camera has no live test until naoqi-sim feeds it (open question 3).
+A test gated on `camera` enables the top camera at `qvga`, 10 fps, waits up to 3 s for `latest()`, and asserts the frame is 320×240 with `len(data) == width × height × 3`, that `camera_transform` is a plausible pose (last row `0 0 0 1`, the camera between 0.3 and 0.6 m above the ground, since the robot is sitting or standing), and that at least 5 frames arrive in the next second; it records the measured rate in the run's `measured live` summary. A second test, gated on `camera` too, holds a BGR subscription of its own on the top camera beside the feed and compares: on the same capture (a sim serves both the same one) the feed's colours are Naoqi's within a level on average (not pixel for pixel: Naoqi scales a QVGA image differently by colorspace, which moves sharp edges by tens of levels); on different captures (a robot's) each channel's mean is within six levels, which a swapped channel or a wrong range misses. It records the error. The `camera` capability already exists and the `sim` profile pins it ([testing_support.md](testing_support.md)): naoqi-sim renders the top camera at 15 fps into `ALVideoDevice`, so the test runs on every CI run. The bottom camera has no live test until naoqi-sim feeds it (open question 3).
 
 ## Relationship to the other specs
 
@@ -194,7 +205,8 @@ A test gated on `camera` enables the top camera at `qvga`, 10 fps, waits up to 3
 1. **The transform at capture time.** The frame's `camera_transform` is read at the pull, within a millisecond, but the capture was up to a period earlier. Naoqi has no "transform at time t", so the fix is the bridge's: a task sampling the camera transforms at a steady rate into a short history, and the feed interpolating at `naoqi_ts` (mapped once onto the bridge's clock from the first frame's pair of stamps). Deferred until a consumer measures the error as a problem; a consumer that needs it exactly can hold the head still for the shot.
 2. **Looking at a pixel.** `ALTracker.lookAt([x, y, z], FRAME_ROBOT, speed, whole_body)` turns the head to a point, verified on the sim (a point at `[1, 0.5, 0.5]` gave yaw 0.47 rad). A `look_at(x, y, z)` verb, or `look_at_pixel(frame, u, v)` doing the ray maths of "The frame" with the frame's own transform, is the natural next step and deliberately not in this spec.
 3. **The bottom camera on a sim.** naoqi-sim renders `CameraTop` only; `CameraBottom` answers a constant placeholder with timestamp 0 (the feed warns once). Rendering the bottom camera is naoqi-sim's open question 1; the bridge needs no change when it lands, and the live tier gains a bottom-camera test then.
-4. **Colorspace.** BGR costs the robot one conversion per frame from its native YUV422. Asking for YUV422 and converting on the host would spare the Nao's CPU at the price of a conversion in the bridge; deferred until a robot shows the need.
+4. ~~**Colorspace.**~~ Decided 2026-11-20 on a robot's measurements: YUV422 on the wire, BGR in the frame ("Colorspace").
 5. **Which streams a server sends.** Today every stream the bridge config enables is streamed to the WebSocket client, as audio is. A server-side list of what to send (so one bridge config serves a client that wants the frames and another that doesn't) is a WebSocket-server concern, recorded there ([naoqi-websocket-server.md](naoqi-websocket-server.md) open questions).
 6. **Several resolutions on one camera.** Rejected for now ("Why one feed per camera, pulled"); if a consumer needs the full 4VGA still beside a QVGA stream, a second subscription on the same camera, requested at runtime and counted against the seven handles, would be the shape.
 7. **The cameras over MCP.** The MCP server exposes no camera yet. Whether an agent gets a picture tool, and in what shape (the frame as an image content, which camera, what an LLM client does with it), is deferred until the agent use case is clearer ([naoqi-mcp-server.md](naoqi-mcp-server.md)).
+8. **Frames over Wi-Fi.** YUV422 makes every frame a third smaller but a Nao v5's Wi-Fi still carries only a few QVGA frames a second, and VGA under two. Compressing on the robot (a package service fetching frames locally and pushing JPEGs, about 13 KB a QVGA frame and 42 KB a VGA one) delivered 9.9 and 8.2 fps over the same Wi-Fi in a trial; it is its own concept, with YUV422 as the path for a robot without it.

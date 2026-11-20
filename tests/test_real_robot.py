@@ -7,10 +7,11 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 import pytest
 from qi_stub import StubSession
 
-from naoqi_bridge.real_robot import RealNaoqiRobot
+from naoqi_bridge.real_robot import RealNaoqiRobot, yuv422_to_bgr
 from naoqi_bridge.robot import RobotConnectionError
 
 
@@ -242,10 +243,18 @@ def test_a_say_naoqi_fails_without_a_stop_still_raises(stub_qi: type[StubSession
 TRANSFORM = [float(i) for i in range(16)]
 
 
+# One pair of pixels in YUV422 (Y0 U Y1 V): black then white, no colour.
+BLACK_WHITE_YUV422 = bytes([16, 128, 235, 128])
+
+
 def _image(ts_s: int = 12, ts_us: int = 500000) -> list[Any]:
     """An ALVideoDevice image: width, height, layers, colorspace, ts_s, ts_us, buffer,
     camera id, left, top, right, bottom angles."""
-    return [2, 1, 3, 13, ts_s, ts_us, bytearray(range(6)), 0, 0.5, 0.4, -0.5, -0.4]
+    return [
+        *(2, 1, 2, 9, ts_s, ts_us),
+        bytearray(BLACK_WHITE_YUV422),
+        *(0, 0.5, 0.4, -0.5, -0.4),
+    ]
 
 
 def _camera_robot(stub_qi: type[StubSession]) -> RealNaoqiRobot:
@@ -258,7 +267,7 @@ def _camera_robot(stub_qi: type[StubSession]) -> RealNaoqiRobot:
     return robot
 
 
-def test_subscribing_a_camera_clears_stale_handles_then_asks_for_bgr(
+def test_subscribing_a_camera_clears_stale_handles_then_asks_for_yuv422(
     stub_qi: type[StubSession],
 ):
     robot = _camera_robot(stub_qi)
@@ -268,7 +277,7 @@ def test_subscribing_a_camera_clears_stale_handles_then_asks_for_bgr(
             ("ALVideoDevice", "unsubscribe", (f"NaoqiBridgeCameraBottom_{n}",))
             for n in range(7)
         ),
-        ("ALVideoDevice", "subscribeCamera", ("NaoqiBridgeCameraBottom", 1, 2, 13, 15)),
+        ("ALVideoDevice", "subscribeCamera", ("NaoqiBridgeCameraBottom", 1, 2, 9, 15)),
     ]
 
 
@@ -293,10 +302,43 @@ def test_reading_a_camera_pulls_the_image_then_the_pose_then_releases(
     ]
     assert read is not None
     assert (read.width, read.height) == (2, 1)
-    assert read.data == bytes(range(6))
+    assert read.data == bytes([0, 0, 0, 255, 255, 255])  # BGR, converted
     assert read.naoqi_ts == 12.5
     assert read.fov == pytest.approx((1.0, 0.8))
     assert read.transform == tuple(TRANSFORM)
+
+
+def test_yuv422_converts_to_the_bgr_naoqi_would_serve():
+    # Each pixel keeps its own luma and shares its pair's colour; BT.601 limited range,
+    # Naoqi's own conversion: Y 16 is black, Y 235 white, and (81, 90, 240) pure red.
+    pixels = bytes([16, 128, 235, 128, 81, 90, 81, 240])
+    bgr = yuv422_to_bgr(pixels, 2, 2)
+    assert bgr[:6] == bytes([0, 0, 0, 255, 255, 255])  # first row: black, white
+    blue, green, red = bgr[6:9]
+    assert (blue, green) == (0, 0) and red >= 250  # second row: red, twice
+    assert bgr[9:12] == bgr[6:9]
+
+
+def test_yuv422_round_trips_a_bgr_image():
+    rng = np.random.default_rng(7)
+    # Colour that is constant over each pair of pixels, as YUV422 can carry it.
+    pairs = rng.integers(20, 236, size=(24, 16, 3)).astype(np.float64)
+    bgr = np.repeat(pairs, 2, axis=1)
+    b, g, r = bgr[..., 0], bgr[..., 1], bgr[..., 2]
+    y = 16 + (65.738 * r + 129.057 * g + 25.064 * b) / 256
+    u = 128 + (-37.945 * r - 74.494 * g + 112.439 * b) / 256
+    v = 128 + (112.439 * r - 94.154 * g - 18.285 * b) / 256
+    yuyv = np.empty((24, 16, 4))
+    yuyv[..., 0], yuyv[..., 2] = y[:, 0::2], y[:, 1::2]
+    yuyv[..., 1], yuyv[..., 3] = u[:, 0::2], v[:, 0::2]
+    data = np.clip(np.rint(yuyv), 0, 255).astype(np.uint8).tobytes()
+    back = np.frombuffer(yuv422_to_bgr(data, 32, 24), np.uint8).reshape(24, 32, 3)
+    assert np.abs(back.astype(int) - bgr.astype(int)).max() <= 2
+
+
+def test_a_yuv422_buffer_of_the_wrong_size_is_refused():
+    with pytest.raises(ValueError, match="2x1 YUV422 image has 4 bytes, got 6"):
+        yuv422_to_bgr(bytes(6), 2, 1)
 
 
 def test_a_camera_that_returns_no_image_reads_as_none(stub_qi: type[StubSession]):
