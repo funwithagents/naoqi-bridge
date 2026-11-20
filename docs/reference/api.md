@@ -161,7 +161,7 @@ class CameraFrame:
     camera: Camera                     # "top" | "bottom"
     width: int
     height: int
-    data: bytes                        # BGR, 3 bytes per pixel, row-major
+    data: bytes                        # BGR, 3 bytes per pixel, row-major (the bridge converts Naoqi's YUV422)
     naoqi_ts: float                    # Naoqi's capture time, on the robot's clock
     camera_transform: tuple[float, ...]  # row-major 4x4, camera -> FRAME_ROBOT, at the pull
     fov: tuple[float, float]           # horizontal, vertical, radians

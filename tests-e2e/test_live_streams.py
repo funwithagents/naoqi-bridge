@@ -1,6 +1,6 @@
 """Live: the robot's streams, on the target. Joints on any target, audio where Naoqi
 pushes it (`audio_in`), a tone played into the sim's microphone (`audio_inject`), the
-top camera's frames and pose (`camera`), and
+top camera's frames, pose and colours (`camera`), and
 a head touch where a person can press the sensors (`touch_sensors`, `person_present`:
 NAOQI_E2E_INTERACTIVE=1, with `-s` to see the prompt).
 """
@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 import pytest
-from support import MEASUREMENTS
+from support import MEASUREMENTS, naoqi
 
 from naoqi_bridge import (
     AudioStream,
@@ -161,6 +161,65 @@ def test_the_top_camera_streams_frames_with_its_pose():
     assert 0.3 < transform[11] < 0.6  # the camera's height: sitting or standing
     assert all(0.5 < angle < 1.5 for angle in frame.fov)
     assert frames >= 5
+
+
+@pytest.mark.requires("camera")
+def test_the_top_cameras_colours_are_naoqis_own():
+    """The feed's BGR, which the bridge converts from YUV422, against the BGR Naoqi
+    converts itself for a subscription of its own: within a level on the same capture (a
+    sim serves both subscriptions the same one) on average, within a few levels per channel when
+    the two captures differ (a robot's), which a swapped channel or a wrong range misses."""
+    config = live_config(
+        StreamSettings(
+            cameras=CameraStreams(
+                top=CameraStream(enabled=True, resolution="qvga", fps=10)
+            )
+        )
+    )
+
+    async def run() -> tuple[CameraFrame, np.ndarray, float]:
+        async with live_session(config) as bridge:
+            video = naoqi(bridge, "ALVideoDevice")
+            handle = video.subscribeCamera("NaoqiBridgeLiveBgr", 0, 1, 13, 10)  # type: ignore[attr-defined]
+            try:
+                await asyncio.sleep(0.5)
+                image = await asyncio.to_thread(video.getImageRemote, handle)  # type: ignore[attr-defined]
+            finally:
+                video.unsubscribe(handle)  # type: ignore[attr-defined]
+            width, height = int(image[0]), int(image[1])
+            reference = np.frombuffer(bytes(image[6]), np.uint8).reshape(
+                height, width, 3
+            )
+            ts = image[4] + image[5] / 1e6
+            async with asyncio.timeout(3.0):
+                frame = await bridge.cameras["top"].wait_for(lambda f: f.naoqi_ts >= ts)
+            return frame, reference, ts
+
+    frame, reference, ts = asyncio.run(run())
+    ours = frame.image.astype(int)
+    theirs = reference.astype(int)
+    assert ours.shape == theirs.shape
+    channel_gap = np.abs(ours.mean(axis=(0, 1)) - theirs.mean(axis=(0, 1)))
+    if frame.naoqi_ts == ts:
+        error = np.abs(ours - theirs)
+        MEASUREMENTS.append(
+            (
+                "top camera YUV422 vs Naoqi's BGR",
+                f"mean {error.mean():.2f}, p99 {np.percentile(error, 99):.0f} levels",
+            )
+        )
+        # Within a level on average. Not pixel for pixel: Naoqi scales the QVGA image
+        # differently by colorspace, which moves sharp edges by tens of levels; a wrong
+        # range or a swapped channel moves the mean by several.
+        assert error.mean() < 1.0
+    else:
+        MEASUREMENTS.append(
+            (
+                "top camera YUV422 vs Naoqi's BGR, other capture",
+                f"channel means {channel_gap.round(1).tolist()}",
+            )
+        )
+    assert channel_gap.max() < 6
 
 
 @pytest.mark.requires("touch_sensors", "person_present")
